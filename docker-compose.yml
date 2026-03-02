@@ -1,0 +1,33 @@
+services:
+  be-chatbot:
+    image: tplong/be-chatbot:latest
+    platform: linux/amd64
+    container_name: be-chatbot
+    # ports:
+    #   - "${BE_PORT:-3001}:${BE_PORT:-3001}"
+    expose:
+      - 3001
+    environment:
+      - PORT=${BE_PORT:-3001}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - DEFAULT_EMBEDDING_PROVIDER=${DEFAULT_EMBEDDING_PROVIDER:-openai}
+      - DEFAULT_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL:-text-embedding-3-large}
+      - CHUNK_SIZE=${CHUNK_SIZE:-1000}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-500}
+      - AISTUDIO_BASE_URL=${AISTUDIO_BASE_URL:-http://ai-studio-proxy:2048/v1}
+      - AISTUDIO_API_KEY=${AISTUDIO_API_KEY:-sk-placeholder}
+      - NEO4J_URI=${NEO4J_URI:-bolt://neo4j:7687}
+      - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-neo4j_password}
+      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
+      - SEARCH_TOP_K=${SEARCH_TOP_K:-5}
+      - GRAPH_SIMILARITY_TOP_K=${GRAPH_SIMILARITY_TOP_K:-5}
+      - GRAPH_MIN_RELATED_CONNECTIONS=${GRAPH_MIN_RELATED_CONNECTIONS:-2}
+    networks:
+      - app-net
+    restart: unless-stopped
+
+networks:
+  app-net:
+    name: app-net
