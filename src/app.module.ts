@@ -4,12 +4,14 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import configuration from './config/configuration';
 import { Neo4jModule } from './modules/neo4j/neo4j.module';
+import { MssqlModule } from './modules/mssql/mssql.module';
 import { EmbeddingsModule } from './modules/embeddings/embeddings.module';
 import { LlmModule } from './modules/llm/llm.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { DocumentModule } from './modules/document/document.module';
 import { ModelModule } from './modules/model/model.module';
 import { GraphModule } from './modules/graph/graph.module';
+import { SchemaModule } from './modules/schema/schema.module';
 
 @Module({
   imports: [
@@ -18,12 +20,14 @@ import { GraphModule } from './modules/graph/graph.module';
       load: [configuration],
     }),
     Neo4jModule,
+    MssqlModule,
     EmbeddingsModule,
     LlmModule,
     ChatModule,
     DocumentModule,
     ModelModule,
     GraphModule,
+    SchemaModule,
   ],
   controllers: [AppController],
   providers: [AppService],

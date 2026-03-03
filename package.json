@@ -31,6 +31,7 @@
     "@nestjs/platform-express": "^11.0.1",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "mssql": "^12.2.0",
     "neo4j-driver": "^6.0.1",
     "pdfjs-dist": "^5.5.207",
     "reflect-metadata": "^0.2.2",
