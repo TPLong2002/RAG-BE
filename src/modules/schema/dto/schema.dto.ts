@@ -24,6 +24,38 @@ export class CreateForeignKeyDto {
   toColumn: string;
 }
 
+export class UpdateForeignKeyDto {
+  @IsString()
+  oldFromTable: string;
+
+  @IsString()
+  oldFromColumn: string;
+
+  @IsString()
+  oldToTable: string;
+
+  @IsString()
+  oldToColumn: string;
+
+  @IsString()
+  newFromTable: string;
+
+  @IsString()
+  newFromColumn: string;
+
+  @IsString()
+  newToTable: string;
+
+  @IsString()
+  newToColumn: string;
+}
+
+export class SyncTablesDto {
+  @IsArray()
+  @IsString({ each: true })
+  tableNames: string[];
+}
+
 export class UpdateTableDto {
   @IsOptional()
   @IsString()

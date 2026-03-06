@@ -10,6 +10,14 @@ export interface MssqlColumnInfo {
   isPrimaryKey: boolean;
 }
 
+export interface MssqlForeignKeyInfo {
+  fromTable: string;
+  fromColumn: string;
+  toTable: string;
+  toColumn: string;
+  constraintName: string;
+}
+
 export interface MssqlTableInfo {
   tableName: string;
   schemaName: string;
@@ -136,5 +144,37 @@ export class MssqlService implements OnModuleInit, OnModuleDestroy {
     );
 
     return tablesWithSchema;
+  }
+
+  async getForeignKeys(): Promise<MssqlForeignKeyInfo[]> {
+    const query = `
+      SELECT
+        tp.name AS fromTable,
+        cp.name AS fromColumn,
+        tr.name AS toTable,
+        cr.name AS toColumn,
+        fk.name AS constraintName
+      FROM sys.foreign_keys fk
+      INNER JOIN sys.foreign_key_columns fkc
+        ON fk.object_id = fkc.constraint_object_id
+      INNER JOIN sys.tables tp
+        ON fkc.parent_object_id = tp.object_id
+      INNER JOIN sys.columns cp
+        ON fkc.parent_object_id = cp.object_id AND fkc.parent_column_id = cp.column_id
+      INNER JOIN sys.tables tr
+        ON fkc.referenced_object_id = tr.object_id
+      INNER JOIN sys.columns cr
+        ON fkc.referenced_object_id = cr.object_id AND fkc.referenced_column_id = cr.column_id
+      ORDER BY tp.name, cp.name
+    `;
+
+    const result = await this.pool.request().query(query);
+    return result.recordset.map((row) => ({
+      fromTable: row.fromTable,
+      fromColumn: row.fromColumn,
+      toTable: row.toTable,
+      toColumn: row.toColumn,
+      constraintName: row.constraintName,
+    }));
   }
 }
