@@ -8,6 +8,7 @@ import {
   UseGuards,
   UseInterceptors,
   UploadedFiles,
+  Query,
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
@@ -16,11 +17,14 @@ import { DocumentService } from './document.service';
 import { UploadDocumentDto } from './dto/upload.dto';
 import { AuthGuard } from '../../common/guards/auth.guard';
 import { UserId } from '../../common/decorators/user-id.decorator';
-
+import { GoogleDriveService } from './google-drive.service';
 @Controller('api/documents')
 @UseGuards(AuthGuard)
 export class DocumentController {
-  constructor(private documentService: DocumentService) {}
+  constructor(
+    private documentService: DocumentService,
+    private googleDriveService: GoogleDriveService,
+  ) {}
 
   @Post('upload')
   @UseInterceptors(
@@ -87,4 +91,109 @@ export class DocumentController {
     await this.documentService.deleteDocument(id);
     return { success: true };
   }
+
+  @Get('drive/auth-url')
+  getAuthUrl() {
+    return { url: this.googleDriveService.getAuthUrl() };
+  }
+
+  // Callback từ Google
+  @Get('drive/callback')
+  async callback(@Query('code') code: string) {
+    await this.googleDriveService.setTokens(code);
+    return 'Done! You can close this tab and go back to the app.';
+  }
+
+  // List file trong folder
+  @Get('drive/files')
+  async listDriveFiles(
+    @Query('folderId') folderId: string,
+    @Query('search') search: string,
+  ) {
+    const files = await this.googleDriveService.listFiles(folderId, search);
+    return { files };
+  }
+
+  // Ingest file từ Drive
+  @Post('drive/ingest')
+  async ingestFromDrive(
+    @Body()
+    dto: {
+      fileId: string;
+      embeddingProvider?: string;
+      embeddingModel?: string;
+    },
+    @UserId() userId: string,
+  ) {
+    // Tạo đường dẫn tạm
+    const tempPath = `./uploads/drive_${Date.now()}`;
+
+    try {
+      // 1. Tải từ Drive về và tự động chuyển sang PDF bên trong Service
+      const fileInfo: any = await this.googleDriveService.downloadFile(
+        dto.fileId,
+        tempPath,
+      );
+
+      // 2. Tính mã Hash của file vừa tải về
+      const textHash = await this.documentService.calculateTextHash(
+        fileInfo.path,
+        fileInfo.mimeType,
+      );
+
+      console.log('abcd1', textHash);
+      if (!textHash)
+        throw new Error('Không thể trích nội dung từ văn bản này.');
+
+      // 3. Kiểm tra trùng lặp trong Neo4j
+      const existingDoc = await this.documentService.findByHash(
+        textHash,
+        userId,
+      );
+      console.log('abc', existingDoc);
+      if (existingDoc) {
+        console.log(
+          `♻️ File "${fileInfo.name}" đã tồn tại (Hash: ${textHash}). Dùng lại dữ liệu cũ.`,
+        );
+        // Xóa file tạm vừa tải về vì không cần dùng nữa
+        await fs.unlink(fileInfo.path).catch(() => {});
+        // Trả về document cũ đã có trong DB
+        return {
+          document: {
+            fileName: fileInfo.name,
+          },
+          isExisting: true,
+        };
+
+        // return { document: existingDoc };
+      }
+
+      // 4. Đưa vào DocumentService để xử lý LangChain/Neo4j (Nếu chưa tồn tại)
+      const meta = await this.documentService.uploadDocument(
+        fileInfo.path,
+        fileInfo.name,
+        fileInfo.mimeType,
+        fileInfo.size,
+        {
+          embeddingProvider: (dto.embeddingProvider || 'openai') as any,
+          embeddingModel: dto.embeddingModel || 'text-embedding-3-small',
+          ownerId: userId,
+          hash: textHash, // Truyền hash để lưu vào Node Document
+        },
+      );
+
+      // 5. Xóa file tạm sau khi đã lưu vào DB/Vector Store
+      await fs.unlink(fileInfo.path).catch(() => {});
+
+      return { document: meta };
+    } catch (error) {
+      // Xóa file tạm nếu có lỗi xảy ra
+      if (require('fs').existsSync(tempPath)) {
+        await fs.unlink(tempPath).catch(() => {});
+      }
+      throw error;
+    }
+  }
 }
+
+ 

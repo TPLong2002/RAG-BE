@@ -5,6 +5,7 @@ import { DocumentService } from './document.service';
 import { FileParserService } from './file-parser.service';
 import { Neo4jModule } from '../neo4j/neo4j.module';
 import { EmbeddingsModule } from '../embeddings/embeddings.module';
+import { GoogleDriveService } from './google-drive.service';
 
 @Module({
   imports: [
@@ -15,6 +16,6 @@ import { EmbeddingsModule } from '../embeddings/embeddings.module';
     }),
   ],
   controllers: [DocumentController],
-  providers: [DocumentService, FileParserService],
+  providers: [DocumentService, FileParserService, GoogleDriveService],
 })
 export class DocumentModule {}

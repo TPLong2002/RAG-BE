@@ -56,6 +56,7 @@ export interface UploadOptions {
   embeddingProvider: EmbeddingProvider;
   embeddingModel: string;
   ownerId?: string;
+  hash?: string;
 }
 
 export interface SimilarityPair {
