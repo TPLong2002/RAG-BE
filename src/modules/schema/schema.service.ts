@@ -2,9 +2,17 @@ import { Injectable } from '@nestjs/common';
 import { Neo4jService } from '../neo4j/neo4j.service';
 import { MssqlService, MssqlTableInfo, MssqlForeignKeyInfo } from '../mssql/mssql.service';
 
+export interface ColumnChange {
+  columnName: string;
+  changeType: 'added' | 'removed' | 'modified' | 'type-changed' | 'nullability-changed' | 'primary-key-changed';
+  oldValue?: any;
+  newValue?: any;
+}
+
 export interface TableDetail {
   name: string;
   displayName: string;
+  objectId?: number;
   columns: {
     name: string;
     type: string;
@@ -12,12 +20,22 @@ export interface TableDetail {
     isPrimaryKey: boolean;
   }[];
   source: 'mssql' | 'neo4j';
+  oldName?: string;
+  columnChanges?: ColumnChange[];
+  changeSummary?: string;
+  neo4jColumns?: {
+    name: string;
+    type: string;
+    nullable: boolean;
+    isPrimaryKey: boolean;
+  }[];
 }
 
 export interface SchemaComparisonResult {
   newTables: TableDetail[];
   existingTables: TableDetail[];
   changedTables: TableDetail[];
+  renamedTables: TableDetail[];
   mssqlForeignKeys: MssqlForeignKeyInfo[];
 }
 
@@ -35,30 +53,76 @@ export class SchemaService {
       this.mssqlService.getForeignKeys(),
     ]);
 
-    const neo4jTableNames = new Set(neo4jTables.map((t) => t.name));
-    const neo4jTableMap = new Map(neo4jTables.map((t) => [t.name, t]));
+    // Create map for Neo4j tables by objectId only
+    const neo4jByObjectId = new Map<number, TableDetail>();
 
-    const newTables: TableDetail[] = mssqlTables
-      .filter((t) => !neo4jTableNames.has(t.tableName))
-      .map((t) => this.convertMssqlToTableDetail(t));
+    for (const table of neo4jTables) {
+      if (table.objectId) {
+        neo4jByObjectId.set(table.objectId, table);
+      }
+    }
 
-    const changedTables: TableDetail[] = mssqlTables
-      .filter((t) => neo4jTableNames.has(t.tableName))
-      .filter((mssqlTable) => {
-        const neo4jTable = neo4jTableMap.get(mssqlTable.tableName);
-        if (!neo4jTable) return false;
-        const mssqlCols = (mssqlTable.columns || []).map((c) => `${c.name}:${c.type}:${c.isPrimaryKey}`).sort().join(',');
-        const neo4jCols = (neo4jTable.columns || []).map((c) => `${c.name}:${c.type}:${c.isPrimaryKey}`).sort().join(',');
-        return mssqlCols !== neo4jCols;
-      })
-      .map((t) => this.convertMssqlToTableDetail(t));
+    const newTables: TableDetail[] = [];
+    const changedTables: TableDetail[] = [];
+    const renamedTables: TableDetail[] = [];
 
-    const existingTables: TableDetail[] = neo4jTables;
+    // Process each MSSQL table - match by objectId only
+    for (const mssqlTable of mssqlTables) {
+      const mssqlTableDetail = this.convertMssqlToTableDetail(mssqlTable);
+      const neo4jMatch = mssqlTable.objectId ? neo4jByObjectId.get(mssqlTable.objectId) : null;
+
+      if (neo4jMatch) {
+        // Found by objectId - table exists in Neo4j
+        if (neo4jMatch.name !== mssqlTable.tableName) {
+          // Table renamed
+          const columnChanges = this.getColumnChanges(
+            mssqlTableDetail.columns,
+            neo4jMatch.columns || []
+          );
+          const renamedTable = {
+            ...mssqlTableDetail,
+            oldName: neo4jMatch.name,
+            neo4jColumns: neo4jMatch.columns,
+            columnChanges,
+            changeSummary: `Table renamed from "${neo4jMatch.name}" to "${mssqlTable.tableName}"${columnChanges.length > 0 ? ` + ${columnChanges.length} column change(s)` : ''}`
+          };
+          renamedTables.push(renamedTable);
+        } else {
+          // Same name, check if columns changed
+          const mssqlCols = mssqlTableDetail.columns.map((c) => `${c.name}:${c.type}:${c.nullable}:${c.isPrimaryKey}`).sort().join(',');
+          const neo4jCols = (neo4jMatch.columns || []).map((c) => `${c.name}:${c.type}:${c.nullable}:${c.isPrimaryKey}`).sort().join(',');
+          if (mssqlCols !== neo4jCols) {
+            const columnChanges = this.getColumnChanges(
+              mssqlTableDetail.columns,
+              neo4jMatch.columns || []
+            );
+            const changeTypes = columnChanges.map(c => c.changeType);
+            const changeSummary = columnChanges.length > 0
+              ? `Column changes: ${columnChanges.length} (${[...new Set(changeTypes)].join(', ')})`
+              : 'Schema changed';
+            const changedTable = {
+              ...mssqlTableDetail,
+              neo4jColumns: neo4jMatch.columns,
+              columnChanges,
+              changeSummary
+            };
+            changedTables.push(changedTable);
+          }
+        }
+      } else {
+        // New table (not found by objectId)
+        newTables.push(mssqlTableDetail);
+      }
+    }
+
+    // Existing tables are ALL tables in Neo4j
+    const existingTables = neo4jTables;
 
     return {
       newTables,
       existingTables,
       changedTables,
+      renamedTables,
       mssqlForeignKeys,
     };
   }
@@ -69,7 +133,8 @@ export class SchemaService {
       RETURN t.name AS name,
              t.displayName AS displayName,
              t.columns AS columns,
-             t.source AS source
+             t.source AS source,
+             t.objectId AS objectId
     `;
 
     const result = await this.neo4jService.runQuery<{
@@ -77,6 +142,7 @@ export class SchemaService {
       displayName: string;
       columns: string;
       source: string;
+      objectId: number | null;
     }>(query);
 
     return result.map((row) => ({
@@ -84,21 +150,97 @@ export class SchemaService {
       displayName: row.displayName || row.name,
       columns: row.columns ? JSON.parse(row.columns) : [],
       source: (row.source as 'mssql' | 'neo4j') || 'neo4j',
+      objectId: row.objectId || undefined,
     }));
+  }
+
+  private formatColumnType(col: { type: string; maxLength?: number | null }): string {
+    const typesWithLength = ['varchar', 'nvarchar', 'char', 'nchar', 'varbinary', 'binary'];
+    if (typesWithLength.includes(col.type) && col.maxLength != null) {
+      return `${col.type}(${col.maxLength === -1 ? 'MAX' : col.maxLength})`;
+    }
+    return col.type;
   }
 
   private convertMssqlToTableDetail(mssqlTable: MssqlTableInfo): TableDetail {
     return {
       name: mssqlTable.tableName,
       displayName: mssqlTable.tableName,
+      objectId: mssqlTable.objectId,
       columns: (mssqlTable.columns || []).map((col) => ({
         name: col.name,
-        type: col.type,
+        type: this.formatColumnType(col),
         nullable: col.nullable,
         isPrimaryKey: col.isPrimaryKey,
       })),
       source: 'mssql',
     };
+  }
+
+  private getColumnChanges(
+    mssqlColumns: Array<{name: string; type: string; nullable: boolean; isPrimaryKey: boolean}>,
+    neo4jColumns: Array<{name: string; type: string; nullable: boolean; isPrimaryKey: boolean}>
+  ): ColumnChange[] {
+    const changes: ColumnChange[] = [];
+    const mssqlColMap = new Map(mssqlColumns.map(col => [col.name, col]));
+    const neo4jColMap = new Map(neo4jColumns.map(col => [col.name, col]));
+
+    // Check for added columns (in MSSQL but not in Neo4j)
+    for (const [colName, mssqlCol] of mssqlColMap) {
+      if (!neo4jColMap.has(colName)) {
+        changes.push({
+          columnName: colName,
+          changeType: 'added',
+          newValue: `${mssqlCol.type}${mssqlCol.nullable ? ' NULL' : ' NOT NULL'}${mssqlCol.isPrimaryKey ? ' PK' : ''}`,
+        });
+      }
+    }
+
+    // Check for removed columns (in Neo4j but not in MSSQL)
+    for (const [colName, neo4jCol] of neo4jColMap) {
+      if (!mssqlColMap.has(colName)) {
+        changes.push({
+          columnName: colName,
+          changeType: 'removed',
+          oldValue: `${neo4jCol.type}${neo4jCol.nullable ? ' NULL' : ' NOT NULL'}${neo4jCol.isPrimaryKey ? ' PK' : ''}`,
+        });
+      }
+    }
+
+    // Check for modified columns (same name, different properties)
+    for (const [colName, mssqlCol] of mssqlColMap) {
+      const neo4jCol = neo4jColMap.get(colName);
+      if (!neo4jCol) continue;
+
+      if (mssqlCol.type !== neo4jCol.type) {
+        changes.push({
+          columnName: colName,
+          changeType: 'type-changed',
+          oldValue: neo4jCol.type,
+          newValue: mssqlCol.type,
+        });
+      }
+
+      if (mssqlCol.nullable !== neo4jCol.nullable) {
+        changes.push({
+          columnName: colName,
+          changeType: 'nullability-changed',
+          oldValue: neo4jCol.nullable ? 'NULL' : 'NOT NULL',
+          newValue: mssqlCol.nullable ? 'NULL' : 'NOT NULL',
+        });
+      }
+
+      if (mssqlCol.isPrimaryKey !== neo4jCol.isPrimaryKey) {
+        changes.push({
+          columnName: colName,
+          changeType: 'primary-key-changed',
+          oldValue: neo4jCol.isPrimaryKey ? 'PK' : 'non-PK',
+          newValue: mssqlCol.isPrimaryKey ? 'PK' : 'non-PK',
+        });
+      }
+    }
+
+    return changes;
   }
 
   async importTables(tableNames: string[]): Promise<{ imported: number; errors: string[] }> {
@@ -118,7 +260,7 @@ export class SchemaService {
         const columnsJson = JSON.stringify(
           (mssqlTable.columns || []).map((col) => ({
             name: col.name,
-            type: col.type,
+            type: this.formatColumnType(col),
             nullable: col.nullable,
             isPrimaryKey: col.isPrimaryKey,
           })),
@@ -126,15 +268,18 @@ export class SchemaService {
 
         await this.neo4jService.runQuery(
           `
-          MERGE (t:Table {name: $name})
-          ON CREATE SET t.createdAt = datetime()
-          SET t.displayName = $displayName,
+          MERGE (t:Table {objectId: $objectId})
+          ON CREATE SET t.createdAt = datetime(), t.name = $name
+          SET t.objectId = $objectId,
+              t.displayName = $displayName,
+              t.name = $name,
               t.columns = $columns,
               t.description = $description,
               t.source = $source,
               t.updatedAt = datetime()
         `,
           {
+            objectId: mssqlTable.objectId,
             name: tableName,
             displayName: tableName,
             columns: columnsJson,
@@ -180,43 +325,162 @@ export class SchemaService {
     const errors: string[] = [];
     let synced = 0;
 
+    console.log(`[SchemaService] syncTables called with: ${JSON.stringify(tableNames)}`);
     const mssqlTables = await this.mssqlService.getAllTablesWithSchema();
+    console.log(`[SchemaService] Total MSSQL tables: ${mssqlTables.length}`);
 
     for (const tableName of tableNames) {
       try {
         const mssqlTable = mssqlTables.find((t) => t.tableName === tableName);
         if (!mssqlTable) {
-          errors.push(`Table ${tableName} not found in MSSQL`);
+          const errorMsg = `Table ${tableName} not found in MSSQL`;
+          errors.push(errorMsg);
+          console.log(`[SchemaService] ${errorMsg}`);
           continue;
         }
 
+        console.log(`[SchemaService] Processing table: ${tableName}, objectId: ${mssqlTable.objectId}`);
         const columnsJson = JSON.stringify(
           (mssqlTable.columns || []).map((col) => ({
             name: col.name,
-            type: col.type,
+            type: this.formatColumnType(col),
             nullable: col.nullable,
             isPrimaryKey: col.isPrimaryKey,
           })),
         );
+        console.log(`[SchemaService] Columns JSON length: ${columnsJson.length}`);
 
-        await this.neo4jService.runQuery(
-          `
-          MATCH (t:Table {name: $name})
-          SET t.columns = $columns,
-              t.updatedAt = datetime()
-        `,
-          {
-            name: tableName,
-            columns: columnsJson,
-          },
+        // Find existing table by objectId or name
+        // Priority: 1. objectId, 2. name (current name), 3. create new
+        interface Neo4jTableInfo {
+          name: string;
+          objectId?: number;
+        }
+
+        let existingTable: Neo4jTableInfo | null = null;
+
+        if (mssqlTable.objectId) {
+          // Try to find by objectId first
+          const byObjectId = await this.neo4jService.runQuery<Neo4jTableInfo>(
+            'MATCH (t:Table {objectId: $objectId}) RETURN t.name AS name, t.objectId AS objectId',
+            { objectId: mssqlTable.objectId }
+          );
+          if (byObjectId.length > 0) {
+            existingTable = byObjectId[0];
+            console.log(`[SchemaService] Found by objectId:`, existingTable);
+          } else {
+            // Try to find by name (for renamed tables where objectId doesn't match)
+            const byName = await this.neo4jService.runQuery<Neo4jTableInfo>(
+              'MATCH (t:Table {name: $name}) RETURN t.name AS name, t.objectId AS objectId',
+              { name: tableName }
+            );
+            if (byName.length > 0) {
+              existingTable = byName[0];
+              console.log(`[SchemaService] Found by name (objectId mismatch):`, existingTable);
+            }
+          }
+        } else {
+          // Legacy table without objectId - find by name
+          const byName = await this.neo4jService.runQuery<Neo4jTableInfo>(
+            'MATCH (t:Table {name: $name}) RETURN t.name AS name, t.objectId AS objectId',
+            { name: tableName }
+          );
+          if (byName.length > 0) {
+            existingTable = byName[0];
+            console.log(`[SchemaService] Found by name (legacy):`, existingTable);
+          }
+        }
+
+        let query = '';
+        const params: Record<string, any> = {
+          columns: columnsJson,
+          newName: tableName,
+          displayName: tableName,
+          source: 'mssql'
+        };
+
+        if (existingTable) {
+          // Update existing table
+          console.log(`[SchemaService] Updating existing table: ${existingTable.name} (objectId: ${existingTable.objectId})`);
+
+          // Build WHERE clause: match by current name (since we found it)
+          const whereClause = 'MATCH (t:Table {name: $currentName})';
+          params.currentName = existingTable.name;
+
+          const setClauses = [
+            't.columns = $columns',
+            't.name = $newName',
+            't.displayName = $displayName',
+            "t.source = 'mssql'",
+            't.updatedAt = datetime()'
+          ];
+
+          // If MSSQL has objectId, ensure it's set in Neo4j
+          if (mssqlTable.objectId) {
+            setClauses.push('t.objectId = $objectId');
+            params.objectId = mssqlTable.objectId;
+          } else if (existingTable.objectId) {
+            // Keep existing objectId if MSSQL doesn't have one
+            setClauses.push('t.objectId = $existingObjectId');
+            params.existingObjectId = existingTable.objectId;
+          }
+
+          query = `
+            ${whereClause}
+            SET ${setClauses.join(', ')}
+          `;
+        } else {
+          // Create new table
+          console.log(`[SchemaService] Creating new table: ${tableName}`);
+
+          const onCreateSet = [
+            't.createdAt = datetime()',
+            't.name = $newName',
+            't.displayName = $displayName',
+            't.columns = $columns',
+            "t.source = 'mssql'",
+            't.updatedAt = datetime()'
+          ];
+
+          if (mssqlTable.objectId) {
+            query = `
+              MERGE (t:Table {objectId: $objectId})
+              ON CREATE SET ${onCreateSet.join(', ')}, t.objectId = $objectId
+              ON MATCH SET ${onCreateSet.join(', ')}
+            `;
+            params.objectId = mssqlTable.objectId;
+          } else {
+            query = `
+              MERGE (t:Table {name: $newName})
+              ON CREATE SET ${onCreateSet.join(', ')}
+              ON MATCH SET ${onCreateSet.join(', ')}
+            `;
+          }
+        }
+
+        console.log(`[SchemaService] Executing Neo4j query:\n${query}`);
+        console.log(`[SchemaService] Query params:`, params);
+
+        const result = await this.neo4jService.runQuery(query, params);
+        console.log(`[SchemaService] Query result:`, result);
+
+        // Verify the update
+        const verifyNode = await this.neo4jService.runQuery(
+          'MATCH (t:Table {name: $newName}) RETURN t.name AS name, t.objectId AS objectId, t.columns AS columns',
+          { newName: tableName }
         );
+        console.log(`[SchemaService] Verify after sync:`, verifyNode);
 
+        console.log(`[SchemaService] Successfully synced table: ${tableName}`);
         synced++;
       } catch (error) {
-        errors.push(`Failed to sync ${tableName}: ${error.message}`);
+        const errorMsg = `Failed to sync ${tableName}: ${error.message}`;
+        errors.push(errorMsg);
+        console.error(`[SchemaService] ${errorMsg}`, error);
       }
     }
 
+    console.log(`[SchemaService] syncTables result: synced=${synced}, errors=${errors.length}`);
     return { synced, errors };
   }
 

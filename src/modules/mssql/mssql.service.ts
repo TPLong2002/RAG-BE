@@ -21,6 +21,7 @@ export interface MssqlForeignKeyInfo {
 export interface MssqlTableInfo {
   tableName: string;
   schemaName: string;
+  objectId: number;
   columns?: MssqlColumnInfo[];
 }
 
@@ -79,15 +80,19 @@ export class MssqlService implements OnModuleInit, OnModuleDestroy {
   async getTables(): Promise<MssqlTableInfo[]> {
     const query = `
       SELECT
-        TABLE_SCHEMA AS schemaName,
-        TABLE_NAME AS tableName
-      FROM INFORMATION_SCHEMA.TABLES
-      WHERE TABLE_TYPE = 'BASE TABLE'
-      ORDER BY TABLE_SCHEMA, TABLE_NAME
+        SCHEMA_NAME(t.schema_id) AS schemaName,
+        t.name AS tableName,
+        t.object_id AS objectId
+      FROM sys.tables t
+      ORDER BY schemaName, tableName
     `;
 
     const result = await this.pool.request().query(query);
-    return result.recordset;
+    return result.recordset.map((row: any) => ({
+      schemaName: row.schemaName,
+      tableName: row.tableName,
+      objectId: Number(row.objectId),
+    }));
   }
 
   async getTableSchema(
