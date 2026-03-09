@@ -6,6 +6,8 @@ import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { Neo4jService } from '../neo4j/neo4j.service';
 import { FileParserService } from './file-parser.service';
 import type { DocumentMeta, UploadOptions, AccessControl } from '../../common/types';
+import * as fs from 'fs';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class DocumentService {
@@ -33,7 +35,7 @@ export class DocumentService {
     fileSize: number,
     options: UploadOptions,
   ): Promise<DocumentMeta> {
-    const { embeddingProvider, embeddingModel, ownerId = 'system' } = options;
+    const { embeddingProvider, embeddingModel, ownerId = 'system', hash } = options;
 
     const dimension = this.embeddingsService.getEmbeddingDimension(embeddingModel);
     await this.neo4jService.initNeo4j(dimension);
@@ -73,7 +75,7 @@ export class DocumentService {
     await this.neo4jService.runQuery(
       `CREATE (d:Document {
         documentId: $documentId, fileName: $fileName, fileType: $fileType,
-        fileSize: $fileSize, totalChunks: $totalChunks, ownerId: $ownerId,
+        fileSize: $fileSize, totalChunks: $totalChunks, ownerId: $ownerId, hash: $hash,
         accessControl: $accessControl,
         embeddingProvider: $embeddingProvider, embeddingModel: $embeddingModel,
         uploadedAt: $uploadedAt
@@ -85,6 +87,7 @@ export class DocumentService {
         fileSize,
         totalChunks: chunks.length,
         ownerId,
+        hash: hash || '',
         accessControl: JSON.stringify(accessControl),
         embeddingProvider,
         embeddingModel,
@@ -209,4 +212,35 @@ export class DocumentService {
       { documentId },
     );
   }
+
+  // Hàm tính Hash của file
+  async calculateTextHash(filePath: string, mimeType: string): Promise<string> {
+    // Đọc chữ từ file bằng Service đã có của bạn
+    const { docs } = await this.fileParserService.parseFile(filePath, mimeType);
+    if (!docs.length) return '';
+
+    // Ghép toàn bộ nội dung chữ lại thành 1 chuỗi
+    const fullText = docs.map((d) => d.pageContent).join('\n');
+
+    // Tính mã SHA-256 của chuỗi chữ đó
+    return crypto.createHash('sha256').update(fullText).digest('hex');
+  }
+
+  // Hàm kiểm tra file đã tồn tại trong Neo4j chưa
+  async findByHash(hash: string, userId: string) {
+    const ownerId = userId || 'system';
+
+    const cypher = `
+      MATCH (d:Document {hash: $hash, ownerId: $ownerId})
+      RETURN d
+    `;
+
+    const results = await this.neo4jService.runQuery<any>(cypher, {
+      hash,
+      ownerId: ownerId,
+    });
+
+    return results.length > 0 ? results[0].d : null;
+  }
 }
+ 
