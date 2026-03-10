@@ -1,16 +1,21 @@
 services:
   be-chatbot:
+    build:
+      context: .
     image: tplong/be-chatbot:latest
     platform: linux/amd64
     container_name: be-chatbot
-    # ports:
-    #   - "${BE_PORT:-3001}:${BE_PORT:-3001}"
-    expose:
-      - 3001
+    ports:
+      - "${BE_PORT:-3091}:${BE_PORT:-3091}"
+    # expose:
+    #   - 3001
     environment:
-      - PORT=${BE_PORT:-3001}
+      - BE_PORT=${BE_PORT:-3091}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
       - DEFAULT_EMBEDDING_PROVIDER=${DEFAULT_EMBEDDING_PROVIDER:-openai}
       - DEFAULT_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL:-text-embedding-3-large}
       - CHUNK_SIZE=${CHUNK_SIZE:-1000}
@@ -24,6 +29,13 @@ services:
       - SEARCH_TOP_K=${SEARCH_TOP_K:-5}
       - GRAPH_SIMILARITY_TOP_K=${GRAPH_SIMILARITY_TOP_K:-5}
       - GRAPH_MIN_RELATED_CONNECTIONS=${GRAPH_MIN_RELATED_CONNECTIONS:-2}
+      - MSSQL_SERVER=${MSSQL_SERVER}
+      - MSSQL_PORT=${MSSQL_PORT:-1433}
+      - MSSQL_DATABASE=${MSSQL_DATABASE}
+      - MSSQL_USER=${MSSQL_USER}
+      - MSSQL_PASSWORD=${MSSQL_PASSWORD}
+    volumes:
+      - ./token.json:/app/token.json
     networks:
       - app-net
     restart: unless-stopped
@@ -31,3 +43,4 @@ services:
 networks:
   app-net:
     name: app-net
+ 
