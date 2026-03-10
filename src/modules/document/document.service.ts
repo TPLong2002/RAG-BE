@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { Neo4jService } from '../neo4j/neo4j.service';
+import { GraphService } from '../graph/graph.service';
 import { FileParserService } from './file-parser.service';
 import type { DocumentMeta, UploadOptions, AccessControl } from '../../common/types';
 import * as fs from 'fs';
@@ -16,6 +17,7 @@ export class DocumentService {
   constructor(
     private embeddingsService: EmbeddingsService,
     private neo4jService: Neo4jService,
+    private graphService: GraphService,
     private fileParserService: FileParserService,
     private configService: ConfigService,
   ) {
@@ -137,6 +139,56 @@ export class DocumentService {
          CREATE (current)-[:NEXT_CHUNK]->(next)`,
         { documentId },
       );
+    }
+
+    // Compute cross-document similarity + relationships (non-blocking)
+    try {
+      await this.graphService.computeCrossDocumentSimilarity(documentId, chunks, vectors);
+      await this.graphService.computeDocumentRelationships(documentId);
+    } catch (err) {
+      console.error('Graph similarity error (non-blocking):', err);
+    }
+
+    // Link chunks to existing Table nodes by matching table names in chunk text
+    try {
+      const allTables = await this.neo4jService.runQuery<{ name: string; displayName: string }>(
+        `MATCH (t:Table) RETURN t.name AS name, t.displayName AS displayName`,
+      );
+      if (allTables.length > 0) {
+        const matchedTableNames = new Set<string>();
+        for (const chunk of chunkData) {
+          const textLower = chunk.text.toLowerCase();
+          for (const table of allTables) {
+            if (
+              textLower.includes(table.name) ||
+              textLower.includes(table.displayName.toLowerCase())
+            ) {
+              matchedTableNames.add(table.name);
+              await this.neo4jService.runQuery(
+                `MATCH (c:Chunk {chunkId: $chunkId})
+                 MATCH (t:Table {name: $tableName})
+                 MERGE (c)-[:MENTIONS_TABLE]->(t)`,
+                { chunkId: chunk.chunkId, tableName: table.name },
+              );
+            }
+          }
+        }
+        // Create HAS_TABLE for matched tables
+        if (matchedTableNames.size > 0) {
+          await this.neo4jService.runQuery(
+            `MATCH (d:Document {documentId: $documentId})
+             UNWIND $tableNames AS tn
+             MATCH (t:Table {name: tn})
+             MERGE (d)-[:HAS_TABLE]->(t)`,
+            { documentId, tableNames: [...matchedTableNames] },
+          );
+          console.log(
+            `Linked document ${documentId} to ${matchedTableNames.size} tables: ${[...matchedTableNames].join(', ')}`,
+          );
+        }
+      }
+    } catch (err) {
+      console.error('Table linking error (non-blocking):', err);
     }
 
     return meta;

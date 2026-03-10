@@ -3,6 +3,12 @@ import { ConfigService } from '@nestjs/config';
 import { Neo4jService } from '../neo4j/neo4j.service';
 import neo4j from 'neo4j-driver';
 
+export interface SimilarityPair {
+  sourceChunkId: string;
+  targetChunkId: string;
+  score: number;
+}
+
 export interface GraphNode {
   id: string;
   label: string;
@@ -344,6 +350,73 @@ export class GraphService {
     });
 
     return { nodes, edges: uniqueEdges };
+  }
+
+  async computeCrossDocumentSimilarity(
+    documentId: string,
+    chunkTexts: string[],
+    vectors: number[][],
+  ): Promise<void> {
+    const topK = this.configService.get<number>('graph.similarityTopK', 5);
+    const threshold = this.configService.get<number>('graph.similarityThreshold', 0.8);
+    const pairs: SimilarityPair[] = [];
+
+    for (let i = 0; i < chunkTexts.length; i++) {
+      const sourceChunkId = `${documentId}_chunk_${i}`;
+
+      try {
+        const results = await this.neo4jService.runQuery<{
+          chunkId: string;
+          docId: string;
+          chunkIndex: number;
+          score: number;
+        }>(
+          `CALL db.index.vector.queryNodes('chunk_embeddings', $topK, $vector)
+           YIELD node, score
+           WHERE node.documentId <> $documentId
+           RETURN node.chunkId AS chunkId, node.documentId AS docId,
+                  node.chunkIndex AS chunkIndex, score
+           LIMIT $topK`,
+          { topK: neo4j.int(topK), vector: vectors[i], documentId },
+        );
+
+        for (const r of results.slice(0, topK)) {
+          if (r.score < threshold) continue;
+          pairs.push({
+            sourceChunkId,
+            targetChunkId: r.chunkId,
+            score: r.score,
+          });
+        }
+      } catch (err) {
+        console.error(`Similarity search failed for chunk ${i}:`, err);
+      }
+    }
+
+    if (pairs.length > 0) {
+      await this.neo4jService.runQuery(
+        `UNWIND $pairs AS pair
+         MATCH (a:Chunk {chunkId: pair.sourceChunkId})
+         MATCH (b:Chunk {chunkId: pair.targetChunkId})
+         MERGE (a)-[r:SIMILAR_TO]->(b)
+         SET r.score = pair.score`,
+        { pairs },
+      );
+    }
+  }
+
+  async computeDocumentRelationships(documentId: string): Promise<void> {
+    const minConnections = this.configService.get<number>('graph.minRelatedConnections', 2);
+
+    await this.neo4jService.runQuery(
+      `MATCH (d1:Document {documentId: $documentId})-[:HAS_CHUNK]->(:Chunk)-[s:SIMILAR_TO]-(:Chunk)<-[:HAS_CHUNK]-(d2:Document)
+       WHERE d1 <> d2
+       WITH d1, d2, count(s) AS connectionCount, avg(s.score) AS avgScore
+       WHERE connectionCount >= $minConnections
+       MERGE (d1)-[r:RELATED_TO]->(d2)
+       SET r.score = avgScore, r.connectionCount = connectionCount`,
+      { documentId, minConnections: neo4j.int(minConnections) },
+    );
   }
 
   async deleteTable(tableName: string): Promise<void> {

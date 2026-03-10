@@ -5,12 +5,14 @@ import { DocumentService } from './document.service';
 import { FileParserService } from './file-parser.service';
 import { Neo4jModule } from '../neo4j/neo4j.module';
 import { EmbeddingsModule } from '../embeddings/embeddings.module';
+import { GraphModule } from '../graph/graph.module';
 import { GoogleDriveService } from './google-drive.service';
 
 @Module({
   imports: [
     Neo4jModule,
     EmbeddingsModule,
+    GraphModule,
     MulterModule.register({
       dest: './uploads',
     }),
