@@ -135,13 +135,21 @@ export class GraphService {
         count: number;
       }>(
         `MATCH (d1:Document)-[r:RELATED_TO]->(d2:Document)
-         WHERE d1.documentId IN $ids AND d2.documentId IN $ids
+         WHERE d1.documentId IN $ids OR d2.documentId IN $ids
          RETURN d1.documentId AS source, d2.documentId AS target,
                 r.score AS score, r.connectionCount AS count`,
         { ids: [...nodeSet] },
       );
 
       for (const rel of rels) {
+        if (!nodeSet.has(rel.source)) {
+          nodeSet.add(rel.source);
+          nodes.push({ id: rel.source, label: rel.source, type: 'document', properties: {} });
+        }
+        if (!nodeSet.has(rel.target)) {
+          nodeSet.add(rel.target);
+          nodes.push({ id: rel.target, label: rel.target, type: 'document', properties: {} });
+        }
         edges.push({
           source: rel.source,
           target: rel.target,
@@ -359,39 +367,34 @@ export class GraphService {
   ): Promise<void> {
     const topK = this.configService.get<number>('graph.similarityTopK', 5);
     const threshold = this.configService.get<number>('graph.similarityThreshold', 0.8);
-    const pairs: SimilarityPair[] = [];
 
-    for (let i = 0; i < chunkTexts.length; i++) {
+    const chunkSearches = chunkTexts.map(async (_, i) => {
       const sourceChunkId = `${documentId}_chunk_${i}`;
-
       try {
         const results = await this.neo4jService.runQuery<{
           chunkId: string;
-          docId: string;
-          chunkIndex: number;
           score: number;
         }>(
           `CALL db.index.vector.queryNodes('chunk_embeddings', $topK, $vector)
            YIELD node, score
-           WHERE node.documentId <> $documentId
-           RETURN node.chunkId AS chunkId, node.documentId AS docId,
-                  node.chunkIndex AS chunkIndex, score
+           WHERE node.documentId <> $documentId AND score >= $threshold
+           RETURN node.chunkId AS chunkId, score
            LIMIT $topK`,
-          { topK: neo4j.int(topK), vector: vectors[i], documentId },
+          { topK: neo4j.int(topK), vector: vectors[i], documentId, threshold },
         );
-
-        for (const r of results.slice(0, topK)) {
-          if (r.score < threshold) continue;
-          pairs.push({
-            sourceChunkId,
-            targetChunkId: r.chunkId,
-            score: r.score,
-          });
-        }
+        return results.map((r) => ({
+          sourceChunkId,
+          targetChunkId: r.chunkId,
+          score: r.score,
+        }));
       } catch (err) {
         console.error(`Similarity search failed for chunk ${i}:`, err);
+        return [];
       }
-    }
+    });
+
+    const pairsNested = await Promise.all(chunkSearches);
+    const pairs: SimilarityPair[] = pairsNested.flat();
 
     if (pairs.length > 0) {
       await this.neo4jService.runQuery(
@@ -403,6 +406,17 @@ export class GraphService {
         { pairs },
       );
     }
+  }
+
+  async getAffectedDocumentIds(documentId: string): Promise<string[]> {
+    const results = await this.neo4jService.runQuery<{ documentId: string }>(
+      `MATCH (d:Document {documentId: $documentId})-[:HAS_CHUNK]->(:Chunk)
+             <-[:SIMILAR_TO]-(:Chunk)<-[:HAS_CHUNK]-(other:Document)
+       WHERE other.documentId <> $documentId
+       RETURN DISTINCT other.documentId AS documentId`,
+      { documentId },
+    );
+    return results.map((r) => r.documentId);
   }
 
   async computeDocumentRelationships(documentId: string): Promise<void> {
@@ -438,3 +452,4 @@ export class GraphService {
     );
   }
 }
+ 

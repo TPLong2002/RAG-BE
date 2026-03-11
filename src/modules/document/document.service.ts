@@ -145,6 +145,13 @@ export class DocumentService {
     try {
       await this.graphService.computeCrossDocumentSimilarity(documentId, chunks, vectors);
       await this.graphService.computeDocumentRelationships(documentId);
+      // Recompute RELATED_TO cho các doc cũ bị ảnh hưởng
+      const affectedDocIds = await this.graphService.getAffectedDocumentIds(documentId);
+      await Promise.all(
+        affectedDocIds.map((oldDocId) =>
+          this.graphService.computeDocumentRelationships(oldDocId),
+        ),
+      );
     } catch (err) {
       console.error('Graph similarity error (non-blocking):', err);
     }
@@ -155,25 +162,27 @@ export class DocumentService {
         `MATCH (t:Table) RETURN t.name AS name, t.displayName AS displayName`,
       );
       if (allTables.length > 0) {
+        // Tìm tất cả (chunkId, tableName) match trong JS, batch 1 query UNWIND
+        const mentionPairs: { chunkId: string; tableName: string }[] = [];
         const matchedTableNames = new Set<string>();
         for (const chunk of chunkData) {
           const textLower = chunk.text.toLowerCase();
           for (const table of allTables) {
-            if (
-              textLower.includes(table.name) ||
-              textLower.includes(table.displayName.toLowerCase())
-            ) {
+            if (textLower.includes(table.name) || textLower.includes(table.displayName.toLowerCase())) {
               matchedTableNames.add(table.name);
-              await this.neo4jService.runQuery(
-                `MATCH (c:Chunk {chunkId: $chunkId})
-                 MATCH (t:Table {name: $tableName})
-                 MERGE (c)-[:MENTIONS_TABLE]->(t)`,
-                { chunkId: chunk.chunkId, tableName: table.name },
-              );
+              mentionPairs.push({ chunkId: chunk.chunkId, tableName: table.name });
             }
           }
         }
-        // Create HAS_TABLE for matched tables
+        if (mentionPairs.length > 0) {
+          await this.neo4jService.runQuery(
+            `UNWIND $pairs AS pair
+             MATCH (c:Chunk {chunkId: pair.chunkId})
+             MATCH (t:Table {name: pair.tableName})
+             MERGE (c)-[:MENTIONS_TABLE]->(t)`,
+            { pairs: mentionPairs },
+          );
+        }
         if (matchedTableNames.size > 0) {
           await this.neo4jService.runQuery(
             `MATCH (d:Document {documentId: $documentId})
@@ -278,20 +287,12 @@ export class DocumentService {
     return crypto.createHash('sha256').update(fullText).digest('hex');
   }
 
-  // Hàm kiểm tra file đã tồn tại trong Neo4j chưa
-  async findByHash(hash: string, userId: string) {
-    const ownerId = userId || 'system';
-
-    const cypher = `
-      MATCH (d:Document {hash: $hash, ownerId: $ownerId})
-      RETURN d
-    `;
-
-    const results = await this.neo4jService.runQuery<any>(cypher, {
-      hash,
-      ownerId: ownerId,
-    });
-
+  // Hàm kiểm tra file đã tồn tại trong Neo4j chưa (global, không phân biệt ownerId)
+  async findByHash(hash: string) {
+    const results = await this.neo4jService.runQuery<any>(
+      `MATCH (d:Document {hash: $hash}) RETURN d LIMIT 1`,
+      { hash },
+    );
     return results.length > 0 ? results[0].d : null;
   }
 }
