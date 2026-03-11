@@ -6,6 +6,7 @@ import { Document } from '@langchain/core/documents';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { LlmService } from '../llm/llm.service';
 import { Neo4jService } from '../neo4j/neo4j.service';
+import { GraphService } from '../graph/graph.service';
 import { Neo4jHybridRetriever } from './neo4j-retriever';
 import type { ChatRequest, ChatSource, EmbeddingProvider } from '../../common/types';
 
@@ -32,6 +33,7 @@ export class ChatService {
     private embeddingsService: EmbeddingsService,
     private llmService: LlmService,
     private neo4jService: Neo4jService,
+    private graphService: GraphService,
     private configService: ConfigService,
   ) {
     this.prompt = ChatPromptTemplate.fromMessages([
@@ -69,6 +71,79 @@ export class ChatService {
     }));
   }
 
+  private async enhanceWithGraphContext(docs: Document[]): Promise<Document[]> {
+    try {
+      const chunkIds = docs.map((d) => {
+        const docId = d.metadata.documentId as string;
+        const idx = d.metadata.chunkIndex as number;
+        return `${docId}_chunk_${idx}`;
+      });
+
+      const seenChunkIds = new Set(chunkIds);
+      const additional: Document[] = [];
+
+      // 1. Neighbor chunks (prev/next)
+      const neighbors = await this.graphService.getNeighborChunks(chunkIds);
+      for (const n of neighbors) {
+        if (n.prevChunkId && !seenChunkIds.has(n.prevChunkId) && n.prevText) {
+          seenChunkIds.add(n.prevChunkId);
+          const [docId] = n.prevChunkId.split('_chunk_');
+          additional.push(
+            new Document({
+              pageContent: n.prevText,
+              metadata: { documentId: docId, fileName: n.prevFileName, chunkIndex: n.prevIndex, _graphSource: 'neighbor' },
+            }),
+          );
+        }
+        if (n.nextChunkId && !seenChunkIds.has(n.nextChunkId) && n.nextText) {
+          seenChunkIds.add(n.nextChunkId);
+          const [docId] = n.nextChunkId.split('_chunk_');
+          additional.push(
+            new Document({
+              pageContent: n.nextText,
+              metadata: { documentId: docId, fileName: n.nextFileName, chunkIndex: n.nextIndex, _graphSource: 'neighbor' },
+            }),
+          );
+        }
+      }
+
+      // 2. Cross-document similar chunks
+      const similar = await this.graphService.getSimilarChunksFromGraph(chunkIds, 3);
+      for (const sc of similar) {
+        if (!seenChunkIds.has(sc.chunkId)) {
+          seenChunkIds.add(sc.chunkId);
+          additional.push(
+            new Document({
+              pageContent: sc.text,
+              metadata: {
+                documentId: sc.documentId,
+                fileName: sc.fileName,
+                chunkIndex: sc.chunkIndex,
+                _graphSource: 'similar',
+              },
+            }),
+          );
+        }
+      }
+
+      // 3. Table schema context (via MENTIONS_TABLE)
+      const tableContext = await this.graphService.getTableContextForChunks(chunkIds);
+      if (tableContext) {
+        additional.push(
+          new Document({
+            pageContent: tableContext,
+            metadata: { _graphSource: 'schema', documentId: 'schema', chunkIndex: -1 },
+          }),
+        );
+      }
+
+      return [...docs, ...additional];
+    } catch (err) {
+      console.error('Graph enhancement failed:', err);
+      return docs;
+    }
+  }
+
   async chatStream(
     req: ChatRequest,
     onChunk: (text: string) => void,
@@ -99,7 +174,7 @@ export class ChatService {
 
     const docs = await retriever.invoke(req.question);
     // TODO: enhance with graph context
-    const enhancedDocs = docs;
+    const enhancedDocs = await this.enhanceWithGraphContext(docs);
 
     const context = this.buildContext(enhancedDocs);
 

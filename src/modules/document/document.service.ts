@@ -140,7 +140,7 @@ export class DocumentService {
         { documentId },
       );
     }
-
+ 
     // Compute cross-document similarity + relationships (non-blocking)
     try {
       await this.graphService.computeCrossDocumentSimilarity(documentId, chunks, vectors);
@@ -259,6 +259,9 @@ export class DocumentService {
   }
 
   async deleteDocument(documentId: string): Promise<void> {
+    // Lấy danh sách các doc bị ảnh hưởng trước khi xóa
+    const affectedDocIds = await this.graphService.getAffectedDocumentIds(documentId);
+
     await this.neo4jService.runQuery(
       `MATCH (d:Document {documentId: $documentId})-[ht:HAS_TABLE]->(t:Table)
        OPTIONAL MATCH (d)-[:HAS_CHUNK]->(c:Chunk)-[mt:MENTIONS_TABLE]->(t)
@@ -272,6 +275,13 @@ export class DocumentService {
        DETACH DELETE c, d`,
       { documentId },
     );
+
+    // Recompute RELATED_TO cho các doc bị ảnh hưởng sau khi xóa
+    if (affectedDocIds.length > 0) {
+      await Promise.all(
+        affectedDocIds.map((id) => this.graphService.computeDocumentRelationships(id)),
+      );
+    }
   }
 
   // Hàm tính Hash của file

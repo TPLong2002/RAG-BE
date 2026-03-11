@@ -70,9 +70,11 @@ export interface ChunkNeighbors {
   prevChunkId: string | null;
   prevText: string | null;
   prevIndex: number | null;
+  prevFileName: string | null;
   nextChunkId: string | null;
   nextText: string | null;
   nextIndex: number | null;
+  nextFileName: string | null;
 }
 
 export interface RelatedDocument {
