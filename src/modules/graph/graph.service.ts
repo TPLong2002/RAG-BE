@@ -43,6 +43,29 @@ export class GraphService {
     private readonly configService: ConfigService,
   ) {}
 
+  private async runWithDeadlockRetry(
+    cypher: string,
+    params: Record<string, unknown>,
+    maxRetries = 3,
+  ): Promise<void> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        await this.neo4jService.runQuery(cypher, params);
+        return;
+      } catch (err: any) {
+        const isDeadlock = err?.code === 'Neo.TransientError.Transaction.DeadlockDetected'
+          || err?.message?.includes('deadlock');
+        if (isDeadlock && attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 100 + Math.random() * 100;
+          console.warn(`Deadlock detected, retrying (${attempt + 1}/${maxRetries}) after ${Math.round(delay)}ms`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
   async getRelatedDocuments(documentId: string): Promise<RelatedDocument[]> {
     return this.neo4jService.runQuery<RelatedDocument>(
       `MATCH (d:Document {documentId: $documentId})-[r:RELATED_TO]-(other:Document)
@@ -416,17 +439,21 @@ export class GraphService {
     const pairs: SimilarityPair[] = pairsNested.flat();
 
     if (pairs.length > 0) {
-      await this.neo4jService.runQuery(
-        `UNWIND $pairs AS pair
-         MATCH (a:Chunk {chunkId: pair.sourceChunkId})
-         MATCH (b:Chunk {chunkId: pair.targetChunkId})
-         WITH a, b, pair,
-              CASE WHEN pair.sourceChunkId < pair.targetChunkId THEN a ELSE b END AS src,
-              CASE WHEN pair.sourceChunkId < pair.targetChunkId THEN b ELSE a END AS tgt
-         MERGE (src)-[r:SIMILAR_TO]->(tgt)
-         SET r.score = CASE WHEN r.score IS NULL OR pair.score > r.score THEN pair.score ELSE r.score END`,
-        { pairs },
-      );
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < pairs.length; i += BATCH_SIZE) {
+        const batch = pairs.slice(i, i + BATCH_SIZE);
+        await this.runWithDeadlockRetry(
+          `UNWIND $pairs AS pair
+           MATCH (a:Chunk {chunkId: pair.sourceChunkId})
+           MATCH (b:Chunk {chunkId: pair.targetChunkId})
+           WITH a, b, pair,
+                CASE WHEN pair.sourceChunkId < pair.targetChunkId THEN a ELSE b END AS src,
+                CASE WHEN pair.sourceChunkId < pair.targetChunkId THEN b ELSE a END AS tgt
+           MERGE (src)-[r:SIMILAR_TO]->(tgt)
+           SET r.score = CASE WHEN r.score IS NULL OR pair.score > r.score THEN pair.score ELSE r.score END`,
+          { pairs: batch },
+        );
+      }
     }
   }
 
@@ -447,7 +474,7 @@ export class GraphService {
 
     // Dùng CASE để chuẩn hóa chiều: luôn MERGE theo id nhỏ → id lớn
     // Tránh tạo cả 2 chiều A→B và B→A khi recompute từ cả 2 phía
-    await this.neo4jService.runQuery(
+    await this.runWithDeadlockRetry(
       `MATCH (d1:Document {documentId: $documentId})-[:HAS_CHUNK]->(:Chunk)-[s:SIMILAR_TO]-(:Chunk)<-[:HAS_CHUNK]-(d2:Document)
        WHERE d1 <> d2
        WITH d1, d2, count(s) AS connectionCount, avg(s.score) AS avgScore
@@ -461,7 +488,7 @@ export class GraphService {
     );
 
     // Xóa stale RELATED_TO: các relationship không còn đủ connectionCount
-    await this.neo4jService.runQuery(
+    await this.runWithDeadlockRetry(
       `MATCH (d:Document {documentId: $documentId})-[r:RELATED_TO]-(other:Document)
        WITH d, other, r
        OPTIONAL MATCH (d)-[:HAS_CHUNK]->(:Chunk)-[s:SIMILAR_TO]-(:Chunk)<-[:HAS_CHUNK]-(other)
