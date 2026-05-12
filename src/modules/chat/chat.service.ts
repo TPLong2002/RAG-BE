@@ -8,6 +8,7 @@ import { LlmService } from '../llm/llm.service';
 import { Neo4jService } from '../neo4j/neo4j.service';
 import { GraphService } from '../graph/graph.service';
 import { Neo4jHybridRetriever } from './neo4j-retriever';
+import { CollectionService } from '../collection/collection.service';
 import type { ChatRequest, ChatSource, EmbeddingProvider } from '../../common/types';
 
 const SYSTEM_PROMPT = `You are a knowledgeable assistant specialized in answering questions based on provided documents.
@@ -34,6 +35,7 @@ export class ChatService {
     private llmService: LlmService,
     private neo4jService: Neo4jService,
     private graphService: GraphService,
+    private collectionService: CollectionService,
     private configService: ConfigService,
   ) {
     this.prompt = ChatPromptTemplate.fromMessages([
@@ -144,41 +146,57 @@ export class ChatService {
     }
   }
 
-  async chatStream(
-    req: ChatRequest,
-    onChunk: (text: string) => void,
-  ): Promise<ChatSource[]> {
+  private async resolveDocumentIds(req: ChatRequest): Promise<string[] | undefined> {
+    const docIds = new Set<string>(req.documentIds || []);
+
+    if (req.collectionIds?.length) {
+      const collectionDocIds = await this.collectionService.getDocumentIdsByCollectionIds(req.collectionIds);
+      for (const id of collectionDocIds) docIds.add(id);
+    }
+
+    return docIds.size > 0 ? [...docIds] : undefined;
+  }
+
+  private buildPrompt(instructions?: string): ChatPromptTemplate {
+    if (instructions) {
+      return ChatPromptTemplate.fromMessages([
+        ['system', instructions + '\n\nContext:\n{context}'],
+        ['human', '{question}'],
+      ]);
+    }
+    return this.prompt;
+  }
+
+  private async retrieveAndEnhance(req: ChatRequest, resolvedDocIds?: string[]): Promise<Document[]> {
     const defaultProvider = this.configService.get<string>('embedding.defaultProvider', 'openai') as EmbeddingProvider;
     const defaultModel = this.configService.get<string>('embedding.defaultModel', 'text-embedding-3-small');
 
-    console.log(
-      '🚀 ~ chatStream ~ config.embedding',
-      defaultProvider,
-      defaultModel,
-    );
-
-    const embeddings = this.embeddingsService.createEmbeddings(
-      defaultProvider,
-      defaultModel,
-    );
-    const llm = this.llmService.createLLM(req.provider, req.model);
+    const embeddings = this.embeddingsService.createEmbeddings(defaultProvider, defaultModel);
 
     const retriever = new Neo4jHybridRetriever({
       embeddings,
       neo4jService: this.neo4jService,
       configService: this.configService,
       k: this.configService.get<number>('search.topK'),
-      documentIds: req.documentIds,
+      documentIds: resolvedDocIds,
       userId: req.userId,
     });
 
     const docs = await retriever.invoke(req.question);
-    // TODO: enhance with graph context
-    const enhancedDocs = await this.enhanceWithGraphContext(docs);
+    return this.enhanceWithGraphContext(docs);
+  }
 
+  async chatStream(
+    req: ChatRequest,
+    onChunk: (text: string) => void,
+  ): Promise<ChatSource[]> {
+    const resolvedDocIds = await this.resolveDocumentIds(req);
+    const llm = this.llmService.createLLM(req.provider, req.model);
+    const enhancedDocs = await this.retrieveAndEnhance(req, resolvedDocIds);
     const context = this.buildContext(enhancedDocs);
+    const prompt = this.buildPrompt(req.instructions);
 
-    const chain = this.prompt.pipe(llm).pipe(new StringOutputParser());
+    const chain = prompt.pipe(llm).pipe(new StringOutputParser());
     const stream = await chain.stream({ context, question: req.question });
 
     for await (const chunk of stream) {
@@ -186,5 +204,18 @@ export class ChatService {
     }
 
     return this.buildSources(enhancedDocs);
+  }
+
+  async chatQuery(req: ChatRequest): Promise<{ answer: string; sources: ChatSource[] }> {
+    const resolvedDocIds = await this.resolveDocumentIds(req);
+    const llm = this.llmService.createLLM(req.provider, req.model);
+    const enhancedDocs = await this.retrieveAndEnhance(req, resolvedDocIds);
+    const context = this.buildContext(enhancedDocs);
+    const prompt = this.buildPrompt(req.instructions);
+
+    const chain = prompt.pipe(llm).pipe(new StringOutputParser());
+    const answer = await chain.invoke({ context, question: req.question });
+
+    return { answer, sources: this.buildSources(enhancedDocs) };
   }
 }

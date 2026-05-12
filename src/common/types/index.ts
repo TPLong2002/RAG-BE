@@ -1,4 +1,4 @@
-export type LLMProvider = "openai" | "google" | "aistudio";
+export type LLMProvider = "openai" | "google" | "aistudio" | "zai";
 export type EmbeddingProvider = "openai" | "google";
 
 export interface AccessControl {
@@ -34,6 +34,8 @@ export interface ChatRequest {
   provider: LLMProvider;
   model: string;
   documentIds?: string[];
+  collectionIds?: string[];
+  instructions?: string;
   userId?: string;
 }
 

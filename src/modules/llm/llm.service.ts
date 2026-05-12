@@ -35,6 +35,17 @@ export class LlmService {
             baseURL: aistudio.baseURL,
           },
         });
+      case 'zai': {
+        const zai = this.configService.get('zai');
+        return new ChatOpenAI({
+          apiKey: apiKeys.zai,
+          model,
+          streaming: true,
+          configuration: {
+            baseURL: zai.baseURL,
+          },
+        });
+      }
       default:
         throw new Error(`Unsupported LLM provider: ${provider}`);
     }
@@ -61,6 +72,9 @@ export class LlmService {
         { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (AI Studio)' },
         { id: 'gemini-2.5-flash-preview-05-20', name: 'Gemini 2.5 Flash (AI Studio)' },
         { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (AI Studio)' },
+      ],
+      zai: [
+        { id: 'glm-4.7-flash', name: 'GLM-4.7 Flash' },
       ],
     };
   }
