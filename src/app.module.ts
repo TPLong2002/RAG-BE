@@ -13,6 +13,7 @@ import { ModelModule } from './modules/model/model.module';
 import { GraphModule } from './modules/graph/graph.module';
 import { SchemaModule } from './modules/schema/schema.module';
 import { CollectionModule } from './modules/collection/collection.module';
+import { DiscordRoutingModule } from './modules/discord-routing/discord-routing.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { CollectionModule } from './modules/collection/collection.module';
     GraphModule,
     SchemaModule,
     CollectionModule,
+    DiscordRoutingModule,
   ],
   controllers: [AppController],
   providers: [AppService],
