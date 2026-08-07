@@ -19,7 +19,8 @@ export class FileParserService {
     'application/pdf': (path) => ({
       loader: new PDFLoader(path, {
         splitPages: true,
-        pdfjs: () => import('pdfjs-dist/legacy/build/pdf.mjs'),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        pdfjs: (() => import('pdfjs-dist/legacy/build/pdf.mjs')) as any,
       }),
       fileType: 'pdf',
     }),
