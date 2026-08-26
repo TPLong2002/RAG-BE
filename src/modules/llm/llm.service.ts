@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatOpenAI } from '@langchain/openai';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { ChatOpenRouter } from '@langchain/openrouter';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { LLMProvider } from '../../common/types';
 
@@ -46,6 +47,14 @@ export class LlmService {
           },
         });
       }
+      case 'openrouter': {
+        const openrouter = this.configService.get('openrouter');
+        return new ChatOpenRouter({
+          apiKey: apiKeys.openrouter,
+          model,
+          baseURL: openrouter.baseURL,
+        });
+      }
       default:
         throw new Error(`Unsupported LLM provider: ${provider}`);
     }
@@ -75,6 +84,11 @@ export class LlmService {
       ],
       zai: [
         { id: 'glm-4.7-flash', name: 'GLM-4.7 Flash' },
+      ],
+      openrouter: [
+        { id: 'openai/gpt-4o', name: 'GPT-4o (OpenRouter)' },
+        { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5 (OpenRouter)' },
+        { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash (OpenRouter)' },
       ],
     };
   }

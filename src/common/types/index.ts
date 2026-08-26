@@ -1,4 +1,4 @@
-export type LLMProvider = "openai" | "google" | "aistudio" | "zai";
+export type LLMProvider = "openai" | "google" | "aistudio" | "zai" | "openrouter";
 export type EmbeddingProvider = "openai" | "google";
 
 export interface AccessControl {

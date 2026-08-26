@@ -6,6 +6,7 @@ export default () => ({
     google: process.env.GOOGLE_API_KEY || "",
     aistudio: process.env.AISTUDIO_API_KEY || "sk-placeholder",
     zai: process.env.ZAI_API_KEY || "",
+    openrouter: process.env.OPENROUTER_API_KEY || "",
   },
 
   aistudio: {
@@ -14,6 +15,10 @@ export default () => ({
 
   zai: {
     baseURL: "https://api.z.ai/api/paas/v4/",
+  },
+
+  openrouter: {
+    baseURL: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
   },
 
   embedding: {
