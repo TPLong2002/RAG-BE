@@ -17,10 +17,6 @@ export default () => ({
     baseURL: "https://api.z.ai/api/paas/v4/",
   },
 
-  openrouter: {
-    baseURL: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
-  },
-
   embedding: {
     defaultProvider: process.env.DEFAULT_EMBEDDING_PROVIDER || "openai",
     defaultModel: process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small",

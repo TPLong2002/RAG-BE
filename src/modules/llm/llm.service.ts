@@ -47,14 +47,11 @@ export class LlmService {
           },
         });
       }
-      case 'openrouter': {
-        const openrouter = this.configService.get('openrouter');
+      case 'openrouter':
         return new ChatOpenRouter({
           apiKey: apiKeys.openrouter,
           model,
-          baseURL: openrouter.baseURL,
         });
-      }
       default:
         throw new Error(`Unsupported LLM provider: ${provider}`);
     }
