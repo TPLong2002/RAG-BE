@@ -17,4 +17,12 @@ export class ChatRequestDto {
   @IsArray()
   @IsOptional()
   documentIds?: string[];
+
+  @IsArray()
+  @IsOptional()
+  collectionIds?: string[];
+
+  @IsString()
+  @IsOptional()
+  instructions?: string;
 }

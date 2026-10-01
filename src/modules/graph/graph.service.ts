@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Neo4jService } from '../neo4j/neo4j.service';
 import neo4j from 'neo4j-driver';
+import { ChunkNeighbors } from 'src/common/types';
 
 export interface SimilarityPair {
   sourceChunkId: string;
@@ -42,6 +43,29 @@ export class GraphService {
     private readonly configService: ConfigService,
   ) {}
 
+  private async runWithDeadlockRetry(
+    cypher: string,
+    params: Record<string, unknown>,
+    maxRetries = 3,
+  ): Promise<void> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        await this.neo4jService.runQuery(cypher, params);
+        return;
+      } catch (err: any) {
+        const isDeadlock = err?.code === 'Neo.TransientError.Transaction.DeadlockDetected'
+          || err?.message?.includes('deadlock');
+        if (isDeadlock && attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 100 + Math.random() * 100;
+          console.warn(`Deadlock detected, retrying (${attempt + 1}/${maxRetries}) after ${Math.round(delay)}ms`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
   async getRelatedDocuments(documentId: string): Promise<RelatedDocument[]> {
     return this.neo4jService.runQuery<RelatedDocument>(
       `MATCH (d:Document {documentId: $documentId})-[r:RELATED_TO]-(other:Document)
@@ -67,13 +91,24 @@ export class GraphService {
         relDocName: string | null;
         relScore: number | null;
         relCount: number | null;
+        edgeSrc: string | null;
+        edgeTgt: string | null;
       }>(
         `MATCH (d:Document {documentId: $documentId})
-         OPTIONAL MATCH (d)-[r:RELATED_TO]-(other:Document)
+         OPTIONAL MATCH (d)-[r1:RELATED_TO]->(tgt:Document)
+         WITH d, collect({r: r1, other: tgt, src: d, tgtNode: tgt}) AS outgoing
+         OPTIONAL MATCH (src:Document)-[r2:RELATED_TO]->(d)
+         WITH d, outgoing, collect({r: r2, other: src, src: src, tgtNode: d}) AS incoming
+         WITH d, outgoing + incoming AS allRels
+         UNWIND (CASE WHEN size(allRels) = 0 THEN [null] ELSE allRels END) AS rel
          RETURN d.documentId AS docId, d.fileName AS docName, d.fileType AS docType,
                 d.totalChunks AS chunks,
-                other.documentId AS relDocId, other.fileName AS relDocName,
-                r.score AS relScore, r.connectionCount AS relCount`,
+                CASE WHEN rel IS NULL THEN null ELSE rel.other.documentId END AS relDocId,
+                CASE WHEN rel IS NULL THEN null ELSE rel.other.fileName END AS relDocName,
+                CASE WHEN rel IS NULL THEN null ELSE rel.r.score END AS relScore,
+                CASE WHEN rel IS NULL THEN null ELSE rel.r.connectionCount END AS relCount,
+                CASE WHEN rel IS NULL THEN null ELSE rel.src.documentId END AS edgeSrc,
+                CASE WHEN rel IS NULL THEN null ELSE rel.tgtNode.documentId END AS edgeTgt`,
         { documentId },
       );
 
@@ -96,10 +131,10 @@ export class GraphService {
             properties: {},
           });
         }
-        if (row.relDocId) {
+        if (row.relDocId && row.edgeSrc && row.edgeTgt) {
           edges.push({
-            source: row.docId,
-            target: row.relDocId,
+            source: row.edgeSrc,
+            target: row.edgeTgt,
             type: 'RELATED_TO',
             properties: { score: row.relScore, connectionCount: row.relCount },
           });
@@ -142,6 +177,14 @@ export class GraphService {
       );
 
       for (const rel of rels) {
+        if (!nodeSet.has(rel.source)) {
+          nodeSet.add(rel.source);
+          nodes.push({ id: rel.source, label: rel.source, type: 'document', properties: {} });
+        }
+        if (!nodeSet.has(rel.target)) {
+          nodeSet.add(rel.target);
+          nodes.push({ id: rel.target, label: rel.target, type: 'document', properties: {} });
+        }
         edges.push({
           source: rel.source,
           target: rel.target,
@@ -198,9 +241,16 @@ export class GraphService {
       toFileName: string;
       score: number;
     }>(
-      `MATCH (d:Document {documentId: $documentId})-[:HAS_CHUNK]->(c:Chunk)-[s:SIMILAR_TO]-(other:Chunk)
-       WHERE other.documentId <> $documentId
-       RETURN c.chunkId AS from, other.chunkId AS to, other.fileName AS toFileName, s.score AS score
+      `CALL {
+         MATCH (d:Document {documentId: $documentId})-[:HAS_CHUNK]->(c:Chunk)
+         MATCH (c)-[s:SIMILAR_TO]->(other:Chunk) WHERE other.documentId <> $documentId
+         RETURN c.chunkId AS from, other.chunkId AS to, other.fileName AS toFileName, s.score AS score
+         UNION
+         MATCH (d:Document {documentId: $documentId})-[:HAS_CHUNK]->(c:Chunk)
+         MATCH (other:Chunk)-[s:SIMILAR_TO]->(c) WHERE other.documentId <> $documentId
+         RETURN c.chunkId AS from, other.chunkId AS to, other.fileName AS toFileName, s.score AS score
+       }
+       RETURN from, to, toFileName, score
        LIMIT 20`,
       { documentId },
     );
@@ -359,62 +409,94 @@ export class GraphService {
   ): Promise<void> {
     const topK = this.configService.get<number>('graph.similarityTopK', 5);
     const threshold = this.configService.get<number>('graph.similarityThreshold', 0.8);
-    const pairs: SimilarityPair[] = [];
 
-    for (let i = 0; i < chunkTexts.length; i++) {
+    const chunkSearches = chunkTexts.map(async (_, i) => {
       const sourceChunkId = `${documentId}_chunk_${i}`;
-
       try {
         const results = await this.neo4jService.runQuery<{
           chunkId: string;
-          docId: string;
-          chunkIndex: number;
           score: number;
         }>(
           `CALL db.index.vector.queryNodes('chunk_embeddings', $topK, $vector)
            YIELD node, score
-           WHERE node.documentId <> $documentId
-           RETURN node.chunkId AS chunkId, node.documentId AS docId,
-                  node.chunkIndex AS chunkIndex, score
+           WHERE node.documentId <> $documentId AND score >= $threshold
+           RETURN node.chunkId AS chunkId, score
            LIMIT $topK`,
-          { topK: neo4j.int(topK), vector: vectors[i], documentId },
+          { topK: neo4j.int(topK), vector: vectors[i], documentId, threshold },
         );
-
-        for (const r of results.slice(0, topK)) {
-          if (r.score < threshold) continue;
-          pairs.push({
-            sourceChunkId,
-            targetChunkId: r.chunkId,
-            score: r.score,
-          });
-        }
+        return results.map((r) => ({
+          sourceChunkId,
+          targetChunkId: r.chunkId,
+          score: r.score,
+        }));
       } catch (err) {
         console.error(`Similarity search failed for chunk ${i}:`, err);
+        return [];
       }
-    }
+    });
+
+    const pairsNested = await Promise.all(chunkSearches);
+    const pairs: SimilarityPair[] = pairsNested.flat();
 
     if (pairs.length > 0) {
-      await this.neo4jService.runQuery(
-        `UNWIND $pairs AS pair
-         MATCH (a:Chunk {chunkId: pair.sourceChunkId})
-         MATCH (b:Chunk {chunkId: pair.targetChunkId})
-         MERGE (a)-[r:SIMILAR_TO]->(b)
-         SET r.score = pair.score`,
-        { pairs },
-      );
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < pairs.length; i += BATCH_SIZE) {
+        const batch = pairs.slice(i, i + BATCH_SIZE);
+        await this.runWithDeadlockRetry(
+          `UNWIND $pairs AS pair
+           MATCH (a:Chunk {chunkId: pair.sourceChunkId})
+           MATCH (b:Chunk {chunkId: pair.targetChunkId})
+           WITH a, b, pair,
+                CASE WHEN pair.sourceChunkId < pair.targetChunkId THEN a ELSE b END AS src,
+                CASE WHEN pair.sourceChunkId < pair.targetChunkId THEN b ELSE a END AS tgt
+           MERGE (src)-[r:SIMILAR_TO]->(tgt)
+           SET r.score = CASE WHEN r.score IS NULL OR pair.score > r.score THEN pair.score ELSE r.score END`,
+          { pairs: batch },
+        );
+      }
     }
+  }
+
+  async getAffectedDocumentIds(documentId: string): Promise<string[]> {
+    // Dùng undirected (-) để bắt cả 2 chiều của SIMILAR_TO
+    const results = await this.neo4jService.runQuery<{ documentId: string }>(
+      `MATCH (d:Document {documentId: $documentId})-[:HAS_CHUNK]->(:Chunk)
+             -[:SIMILAR_TO]-(:Chunk)<-[:HAS_CHUNK]-(other:Document)
+       WHERE other.documentId <> $documentId
+       RETURN DISTINCT other.documentId AS documentId`,
+      { documentId },
+    );
+    return results.map((r) => r.documentId);
   }
 
   async computeDocumentRelationships(documentId: string): Promise<void> {
     const minConnections = this.configService.get<number>('graph.minRelatedConnections', 2);
 
-    await this.neo4jService.runQuery(
+    // Dùng CASE để chuẩn hóa chiều: luôn MERGE theo id nhỏ → id lớn
+    // Tránh tạo cả 2 chiều A→B và B→A khi recompute từ cả 2 phía
+    await this.runWithDeadlockRetry(
       `MATCH (d1:Document {documentId: $documentId})-[:HAS_CHUNK]->(:Chunk)-[s:SIMILAR_TO]-(:Chunk)<-[:HAS_CHUNK]-(d2:Document)
        WHERE d1 <> d2
        WITH d1, d2, count(s) AS connectionCount, avg(s.score) AS avgScore
        WHERE connectionCount >= $minConnections
-       MERGE (d1)-[r:RELATED_TO]->(d2)
+       WITH CASE WHEN d1.documentId < d2.documentId THEN d1 ELSE d2 END AS src,
+            CASE WHEN d1.documentId < d2.documentId THEN d2 ELSE d1 END AS tgt,
+            connectionCount, avgScore
+       MERGE (src)-[r:RELATED_TO]->(tgt)
        SET r.score = avgScore, r.connectionCount = connectionCount`,
+      { documentId, minConnections: neo4j.int(minConnections) },
+    );
+
+    // Xóa stale RELATED_TO: các relationship không còn đủ connectionCount
+    await this.runWithDeadlockRetry(
+      `MATCH (d:Document {documentId: $documentId})-[r:RELATED_TO]-(other:Document)
+       WITH d, other, r
+       OPTIONAL MATCH (d)-[:HAS_CHUNK]->(:Chunk)-[s:SIMILAR_TO]-(:Chunk)<-[:HAS_CHUNK]-(other)
+       WITH d, other, r, count(s) AS cntForward
+       OPTIONAL MATCH (d)-[:HAS_CHUNK]->(:Chunk)<-[s2:SIMILAR_TO]-(:Chunk)<-[:HAS_CHUNK]-(other)
+       WITH r, cntForward, count(s2) AS cntReverse
+       WHERE (cntForward + cntReverse) < $minConnections
+       DELETE r`,
       { documentId, minConnections: neo4j.int(minConnections) },
     );
   }
@@ -436,5 +518,142 @@ export class GraphService {
        DELETE fk`,
       { fromTable, toTable, fromColumn, toColumn },
     );
+  }
+  
+  // ==================== Retrieval Enhancement ====================
+
+  async getNeighborChunks(chunkIds: string[]): Promise<ChunkNeighbors[]> {
+    return this.neo4jService.runQuery<ChunkNeighbors>(
+      `UNWIND $chunkIds AS cid
+       MATCH (c:Chunk {chunkId: cid})
+       OPTIONAL MATCH (prev:Chunk)-[:NEXT_CHUNK]->(c)
+       OPTIONAL MATCH (c)-[:NEXT_CHUNK]->(next:Chunk)
+       RETURN c.chunkId AS chunkId,
+              prev.chunkId AS prevChunkId, prev.text AS prevText, prev.chunkIndex AS prevIndex, prev.fileName AS prevFileName,
+              next.chunkId AS nextChunkId, next.text AS nextText, next.chunkIndex AS nextIndex, next.fileName AS nextFileName`,
+      { chunkIds },
+    );
+  }
+
+  async getSimilarChunksFromGraph(
+    chunkIds: string[],
+    limit: number = 3,
+  ): Promise<
+    Array<{
+      chunkId: string;
+      text: string;
+      documentId: string;
+      fileName: string;
+      chunkIndex: number;
+      similarityScore: number;
+    }>
+  > {
+    return this.neo4jService.runQuery(
+      `UNWIND $chunkIds AS cid
+       MATCH (c:Chunk {chunkId: cid})-[s:SIMILAR_TO]-(related:Chunk)
+       WHERE NOT related.chunkId IN $chunkIds
+       WITH related, max(s.score) AS similarityScore
+       RETURN related.chunkId AS chunkId, related.text AS text,
+              related.documentId AS documentId, related.fileName AS fileName,
+              related.chunkIndex AS chunkIndex, similarityScore
+       ORDER BY similarityScore DESC
+       LIMIT $limit`,
+      { chunkIds, limit: neo4j.int(limit) },
+    );
+  }
+
+  async getTableContextForChunks(chunkIds: string[]): Promise<string> {
+    if (!chunkIds.length) return '';
+
+    const tables = await this.neo4jService.runQuery<{
+      name: string;
+      displayName: string;
+      description: string;
+      columns: string;
+    }>(
+      `UNWIND $chunkIds AS cid
+       MATCH (c:Chunk {chunkId: cid})-[:MENTIONS_TABLE]->(t:Table)
+       RETURN DISTINCT t.name AS name, t.displayName AS displayName,
+              t.description AS description, t.columns AS columns`,
+      { chunkIds },
+    );
+
+    if (!tables.length) return '';
+
+    const tableNames = tables.map((t) => t.name);
+
+    const fkTables = await this.neo4jService.runQuery<{
+      name: string;
+      displayName: string;
+      description: string;
+      columns: string;
+      fkFrom: string;
+      fkFromCol: string;
+      fkToCol: string;
+      direction: string;
+    }>(
+      `UNWIND $names AS tName
+       MATCH (t:Table {name: tName})-[fk:FOREIGN_KEY]->(other:Table)
+       WHERE NOT other.name IN $names
+       RETURN DISTINCT other.name AS name, other.displayName AS displayName,
+              other.description AS description, other.columns AS columns,
+              t.name AS fkFrom, fk.fromColumn AS fkFromCol, fk.toColumn AS fkToCol, 'out' AS direction
+       UNION
+       UNWIND $names AS tName
+       MATCH (other:Table)-[fk:FOREIGN_KEY]->(t:Table {name: tName})
+       WHERE NOT other.name IN $names
+       RETURN DISTINCT other.name AS name, other.displayName AS displayName,
+              other.description AS description, other.columns AS columns,
+              t.name AS fkFrom, fk.fromColumn AS fkFromCol, fk.toColumn AS fkToCol, 'in' AS direction`,
+      { names: tableNames },
+    );
+
+    const allNames = [...new Set([...tableNames, ...fkTables.map((t) => t.name)])];
+    const fks = await this.neo4jService.runQuery<{
+      from: string;
+      to: string;
+      fromCol: string;
+      toCol: string;
+    }>(
+      `MATCH (t1:Table)-[fk:FOREIGN_KEY]->(t2:Table)
+       WHERE t1.name IN $names AND t2.name IN $names
+       RETURN t1.name AS from, t2.name AS to,
+              fk.fromColumn AS fromCol, fk.toColumn AS toCol`,
+      { names: allNames },
+    );
+
+    const allTables = [...tables, ...fkTables];
+    const seen = new Set<string>();
+    const lines: string[] = ['=== DATABASE SCHEMA CONTEXT ==='];
+
+    for (const t of allTables) {
+      if (seen.has(t.name)) continue;
+      seen.add(t.name);
+
+      lines.push(`\nTable: ${t.displayName}`);
+      if (t.description) lines.push(`  Description: ${t.description}`);
+
+      try {
+        const cols = JSON.parse(t.columns) as Array<{
+          name: string; type: string; nullable: boolean; isPrimaryKey: boolean; description?: string;
+        }>;
+        lines.push('  Columns:');
+        for (const col of cols) {
+          const pk = col.isPrimaryKey ? ' [PK]' : '';
+          const nullable = col.nullable ? ' NULL' : ' NOT NULL';
+          const desc = col.description ? ` -- ${col.description}` : '';
+          lines.push(`    - ${col.name} ${col.type}${pk}${nullable}${desc}`);
+        }
+      } catch { /* skip */ }
+    }
+
+    if (fks.length > 0) {
+      lines.push('\nForeign Key Relationships:');
+      for (const fk of fks) {
+        lines.push(`  ${fk.from}.${fk.fromCol} -> ${fk.to}.${fk.toCol}`);
+      }
+    }
+
+    return lines.join('\n');
   }
 }

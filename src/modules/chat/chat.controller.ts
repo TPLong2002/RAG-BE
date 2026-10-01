@@ -10,6 +10,28 @@ import { UserId } from '../../common/decorators/user-id.decorator';
 export class ChatController {
   constructor(private chatService: ChatService) {}
 
+  @Post('query')
+  async query(
+    @Body() dto: ChatRequestDto,
+    @UserId() userId: string,
+  ) {
+    try {
+      const result = await this.chatService.chatQuery({
+        question: dto.question,
+        provider: dto.provider,
+        model: dto.model,
+        documentIds: dto.documentIds,
+        collectionIds: dto.collectionIds,
+        instructions: dto.instructions,
+        userId,
+      });
+      return result;
+    } catch (err) {
+      console.error('Chat query error:', err);
+      return { error: (err as Error).message, answer: null, sources: [] };
+    }
+  }
+
   @Post()
   async chat(
     @Body() dto: ChatRequestDto,
@@ -29,6 +51,8 @@ export class ChatController {
           provider: dto.provider,
           model: dto.model,
           documentIds: dto.documentIds,
+          collectionIds: dto.collectionIds,
+          instructions: dto.instructions,
           userId,
         },
         (chunk) => {

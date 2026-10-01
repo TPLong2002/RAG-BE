@@ -1,4 +1,4 @@
-export type LLMProvider = "openai" | "google" | "aistudio";
+export type LLMProvider = "openai" | "google" | "aistudio" | "zai" | "openrouter";
 export type EmbeddingProvider = "openai" | "google";
 
 export interface AccessControl {
@@ -34,6 +34,8 @@ export interface ChatRequest {
   provider: LLMProvider;
   model: string;
   documentIds?: string[];
+  collectionIds?: string[];
+  instructions?: string;
   userId?: string;
 }
 
@@ -70,9 +72,11 @@ export interface ChunkNeighbors {
   prevChunkId: string | null;
   prevText: string | null;
   prevIndex: number | null;
+  prevFileName: string | null;
   nextChunkId: string | null;
   nextText: string | null;
   nextIndex: number | null;
+  nextFileName: string | null;
 }
 
 export interface RelatedDocument {

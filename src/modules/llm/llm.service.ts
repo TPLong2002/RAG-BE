@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatOpenAI } from '@langchain/openai';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { ChatOpenRouter } from '@langchain/openrouter';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { LLMProvider } from '../../common/types';
 
@@ -35,6 +36,22 @@ export class LlmService {
             baseURL: aistudio.baseURL,
           },
         });
+      case 'zai': {
+        const zai = this.configService.get('zai');
+        return new ChatOpenAI({
+          apiKey: apiKeys.zai,
+          model,
+          streaming: true,
+          configuration: {
+            baseURL: zai.baseURL,
+          },
+        });
+      }
+      case 'openrouter':
+        return new ChatOpenRouter({
+          apiKey: apiKeys.openrouter,
+          model,
+        });
       default:
         throw new Error(`Unsupported LLM provider: ${provider}`);
     }
@@ -61,6 +78,14 @@ export class LlmService {
         { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (AI Studio)' },
         { id: 'gemini-2.5-flash-preview-05-20', name: 'Gemini 2.5 Flash (AI Studio)' },
         { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (AI Studio)' },
+      ],
+      zai: [
+        { id: 'glm-4.7-flash', name: 'GLM-4.7 Flash' },
+      ],
+      openrouter: [
+        { id: 'openai/gpt-4o', name: 'GPT-4o (OpenRouter)' },
+        { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5 (OpenRouter)' },
+        { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash (OpenRouter)' },
       ],
     };
   }

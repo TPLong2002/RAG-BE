@@ -61,6 +61,17 @@ export class DocumentController {
     const results: any = [];
     for (const file of files) {
       const fileName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+
+      const textHash = await this.documentService.calculateTextHash(file.path, file.mimetype);
+      if (textHash) {
+        const existing = await this.documentService.findByHash(textHash);
+        if (existing) {
+          await fs.unlink(file.path).catch(() => {});
+          results.push({ fileName, isExisting: true });
+          continue;
+        }
+      }
+
       const meta = await this.documentService.uploadDocument(
         file.path,
         fileName,
@@ -70,6 +81,7 @@ export class DocumentController {
           embeddingProvider,
           embeddingModel,
           ownerId: userId,
+          hash: textHash,
         },
       );
       results.push(meta as any);
@@ -145,11 +157,8 @@ export class DocumentController {
       if (!textHash)
         throw new Error('Không thể trích nội dung từ văn bản này.');
 
-      // 3. Kiểm tra trùng lặp trong Neo4j
-      const existingDoc = await this.documentService.findByHash(
-        textHash,
-        userId,
-      );
+      // 3. Kiểm tra trùng lặp trong Neo4j (global, không phân biệt user)
+      const existingDoc = await this.documentService.findByHash(textHash);
       console.log('abc', existingDoc);
       if (existingDoc) {
         console.log(

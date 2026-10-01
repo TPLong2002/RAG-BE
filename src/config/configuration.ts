@@ -5,10 +5,16 @@ export default () => ({
     openai: process.env.OPENAI_API_KEY || "",
     google: process.env.GOOGLE_API_KEY || "",
     aistudio: process.env.AISTUDIO_API_KEY || "sk-placeholder",
+    zai: process.env.ZAI_API_KEY || "",
+    openrouter: process.env.OPENROUTER_API_KEY || "",
   },
 
   aistudio: {
     baseURL: process.env.AISTUDIO_BASE_URL || "http://localhost:2048/v1",
+  },
+
+  zai: {
+    baseURL: "https://api.z.ai/api/paas/v4/",
   },
 
   embedding: {
